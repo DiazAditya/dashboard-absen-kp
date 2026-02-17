@@ -13,8 +13,8 @@ import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
 
 // --- KONFIGURASI SUPABASE ---
-const String supabaseUrl = 'https://dzanpguxrxzvotgkzadr.supabase.co';
-const String supabaseKey = 'sb_publishable_g-S7VaWHDI6ahBSgOl2m9A_zTMVeOH-';
+const String supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
