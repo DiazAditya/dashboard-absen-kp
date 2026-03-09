@@ -11,14 +11,17 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' as latlong;
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // --- KONFIGURASI SUPABASE ---
-const String supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('id_ID', null);
+  await dotenv.load(fileName: '.env');
+
+  final supabaseUrl = dotenv.env['SUPABASE_URL'] ?? '';
+  final supabaseKey = dotenv.env['SUPABASE_KEY'] ?? '';
 
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseKey);
 
@@ -294,9 +297,10 @@ class _DashboardLayoutState extends State<DashboardLayout> {
                     icon: const Icon(Icons.logout, color: Colors.redAccent),
                     tooltip: 'Logout',
                     onPressed: () async {
+                      final navigator = Navigator.of(context);
                       await Supabase.instance.client.auth.signOut();
                       if (mounted) {
-                        Navigator.of(context).pushReplacement(
+                        navigator.pushReplacement(
                           MaterialPageRoute(
                             builder: (_) => const AdminLoginPage(),
                           ),
