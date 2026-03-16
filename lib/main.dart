@@ -245,6 +245,7 @@ class _DashboardLayoutState extends State<DashboardLayout> {
     const HistoryPage(),
     const EmployeePage(),
     const OfficeSettingsPage(),
+    const HolidayManagementPage(),
   ];
 
   @override
@@ -338,6 +339,17 @@ class _DashboardLayoutState extends State<DashboardLayout> {
                 selectedIcon: Icon(Icons.settings),
                 label: Text('Kantor'),
               ),
+              NavigationRailDestination(
+                icon: Icon(
+                  Icons.calendar_month_outlined,
+                  color: Colors.redAccent,
+                ),
+                selectedIcon: Icon(
+                  Icons.calendar_month,
+                  color: Colors.redAccent,
+                ),
+                label: Text('Libur'),
+              ),
             ],
           ),
           Expanded(
@@ -353,7 +365,7 @@ class _DashboardLayoutState extends State<DashboardLayout> {
   }
 }
 
-// --- 1. HALAMAN MONITORING (REALTIME + MAPS VIEW) ---
+// --- 1. HALAMAN MONITORING ABSENSI HARIAN ---
 class MonitoringPage extends StatefulWidget {
   const MonitoringPage({super.key});
   @override
@@ -361,36 +373,207 @@ class MonitoringPage extends StatefulWidget {
 }
 
 class _MonitoringPageState extends State<MonitoringPage> {
-  final Map<String, dynamic> _profilesMap = {};
-
-  final _attendanceStream = Supabase.instance.client
-      .from('attendances')
-      .stream(primaryKey: ['id'])
-      .order('check_in_time', ascending: false)
-      .limit(50);
+  DateTime _selectedDate = DateTime.now();
+  List<Map<String, dynamic>> _employeeStatuses = [];
+  bool _isLoading = true;
+  TimeOfDay _officeStartTime = const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay _officeEndTime = const TimeOfDay(hour: 17, minute: 0);
 
   @override
   void initState() {
     super.initState();
-    _fetchProfiles();
+    _loadData();
   }
 
-  Future<void> _fetchProfiles() async {
+  Future<void> _loadData() async {
+    setState(() => _isLoading = true);
     try {
-      final List<dynamic> data = await Supabase.instance.client
-          .from('profiles')
-          .select();
-      setState(() {
-        for (var item in data) {
-          _profilesMap[item['id']] = item;
+      // 1. Ambil jam masuk & pulang kantor
+      final officeData = await Supabase.instance.client
+          .from('offices')
+          .select('start_time, end_time')
+          .eq('id', 1)
+          .maybeSingle();
+
+      if (officeData != null && officeData['start_time'] != null) {
+        final parts = officeData['start_time'].toString().split(':');
+        if (parts.length >= 2) {
+          _officeStartTime = TimeOfDay(
+            hour: int.tryParse(parts[0]) ?? 9,
+            minute: int.tryParse(parts[1]) ?? 0,
+          );
         }
+      }
+      if (officeData != null && officeData['end_time'] != null) {
+        final parts = officeData['end_time'].toString().split(':');
+        if (parts.length >= 2) {
+          _officeEndTime = TimeOfDay(
+            hour: int.tryParse(parts[0]) ?? 17,
+            minute: int.tryParse(parts[1]) ?? 0,
+          );
+        }
+      }
+
+      // 2. Ambil semua karyawan (non-admin)
+      final List<dynamic> profiles = await Supabase.instance.client
+          .from('profiles')
+          .select()
+          .neq('role', 'admin')
+          .order('full_name', ascending: true);
+
+      // 3. Ambil absensi pada tanggal terpilih
+      final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
+      final startOfDay = '${dateStr}T00:00:00';
+      final endOfDay = '${dateStr}T23:59:59';
+
+      final List<dynamic> attendances = await Supabase.instance.client
+          .from('attendances')
+          .select()
+          .gte('check_in_time', startOfDay)
+          .lte('check_in_time', endOfDay);
+
+      // 4. Ambil data cuti pada tanggal terpilih
+      final List<dynamic> leaves = await Supabase.instance.client
+          .from('employee_leaves')
+          .select()
+          .eq('leave_date', dateStr);
+
+      // 5. Gabungkan data: mapping per karyawan
+      final Map<String, dynamic> attendanceMap = {};
+      for (var att in attendances) {
+        attendanceMap[att['user_id']] = att;
+      }
+
+      final Map<String, Map<String, dynamic>> leaveMap = {};
+      for (var leave in leaves) {
+        leaveMap[leave['user_id']] = leave;
+      }
+
+      // Helper: parse TIME string "HH:mm:ss" to minutes
+      int timeToMinutes(String timeStr) {
+        final parts = timeStr.split(':');
+        return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+      }
+
+      final officeStartMin = _officeStartTime.hour * 60 + _officeStartTime.minute;
+      final officeEndMin = _officeEndTime.hour * 60 + _officeEndTime.minute;
+
+      final List<Map<String, dynamic>> result = [];
+      for (var profile in profiles) {
+        final userId = profile['id'] as String;
+        final attendance = attendanceMap[userId];
+        final leaveEntry = leaveMap[userId];
+
+        String status;
+        Color statusColor;
+        Color statusBgColor;
+        String timeText = '-';
+
+        String checkOutStatus;
+        Color checkOutColor;
+        Color checkOutBgColor;
+        String checkOutTimeText = '-';
+
+        // Tentukan apakah check-in / check-out di-skip
+        bool skipCheckIn = false;
+        bool skipCheckOut = false;
+        String skipLabel = '';
+
+        if (leaveEntry != null) {
+          final type = leaveEntry['type'] ?? 'cuti';
+          if (type == 'cuti') {
+            skipCheckIn = true;
+            skipCheckOut = true;
+            skipLabel = 'Cuti';
+          } else if (type == 'dinas') {
+            skipLabel = 'Dinas';
+            if (leaveEntry['trip_start_time'] != null && leaveEntry['trip_end_time'] != null) {
+              final tripStartMin = timeToMinutes(leaveEntry['trip_start_time'].toString());
+              final tripEndMin = timeToMinutes(leaveEntry['trip_end_time'].toString());
+              if (tripStartMin <= officeStartMin) skipCheckIn = true;
+              if (tripEndMin >= officeEndMin) skipCheckOut = true;
+            }
+          }
+        }
+
+        // === Status Masuk ===
+        if (skipCheckIn) {
+          status = skipLabel;
+          statusColor = skipLabel == 'Cuti' ? Colors.orange[800]! : Colors.blue[800]!;
+          statusBgColor = skipLabel == 'Cuti' ? Colors.orange[50]! : Colors.blue[50]!;
+        } else if (attendance != null) {
+          final checkInTime = DateTime.parse(attendance['check_in_time']).toLocal();
+          timeText = DateFormat('HH:mm:ss').format(checkInTime);
+          final actualMinutes = checkInTime.hour * 60 + checkInTime.minute;
+
+          if (actualMinutes > officeStartMin) {
+            status = 'Terlambat';
+            statusColor = Colors.red[800]!;
+            statusBgColor = Colors.red[50]!;
+          } else {
+            status = 'Hadir';
+            statusColor = Colors.green[800]!;
+            statusBgColor = Colors.green[50]!;
+          }
+        } else {
+          status = 'Belum Absen';
+          statusColor = Colors.grey[700]!;
+          statusBgColor = Colors.grey[100]!;
+        }
+
+        // === Status Pulang ===
+        if (skipCheckOut) {
+          checkOutStatus = skipLabel;
+          checkOutColor = skipLabel == 'Cuti' ? Colors.orange[800]! : Colors.blue[800]!;
+          checkOutBgColor = skipLabel == 'Cuti' ? Colors.orange[50]! : Colors.blue[50]!;
+        } else if (attendance != null && attendance['check_out_time'] != null) {
+          final checkOutTime = DateTime.parse(attendance['check_out_time']).toLocal();
+          checkOutTimeText = DateFormat('HH:mm:ss').format(checkOutTime);
+          final outMinutes = checkOutTime.hour * 60 + checkOutTime.minute;
+
+          if (outMinutes >= officeEndMin) {
+            checkOutStatus = 'Pulang';
+            checkOutColor = Colors.green[800]!;
+            checkOutBgColor = Colors.green[50]!;
+          } else {
+            checkOutStatus = 'Pulang Awal';
+            checkOutColor = Colors.amber[800]!;
+            checkOutBgColor = Colors.amber[50]!;
+          }
+        } else if (attendance != null) {
+          checkOutStatus = 'Belum Pulang';
+          checkOutColor = Colors.grey[700]!;
+          checkOutBgColor = Colors.grey[100]!;
+        } else {
+          checkOutStatus = '-';
+          checkOutColor = Colors.grey[700]!;
+          checkOutBgColor = Colors.grey[100]!;
+        }
+
+        result.add({
+          'profile': profile,
+          'attendance': attendance,
+          'status': status,
+          'statusColor': statusColor,
+          'statusBgColor': statusBgColor,
+          'timeText': timeText,
+          'checkOutStatus': checkOutStatus,
+          'checkOutColor': checkOutColor,
+          'checkOutBgColor': checkOutBgColor,
+          'checkOutTimeText': checkOutTimeText,
+        });
+      }
+
+      setState(() {
+        _employeeStatuses = result;
+        _isLoading = false;
       });
     } catch (e) {
-      debugPrint("Error profiles: $e");
+      debugPrint("Error loading monitoring: $e");
+      setState(() => _isLoading = false);
     }
   }
 
-  // Fungsi untuk Membuka Popup Peta Lokasi User
   void _showLocationDialog(double lat, double long, String userName) {
     showDialog(
       context: context,
@@ -444,98 +627,225 @@ class _MonitoringPageState extends State<MonitoringPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isToday =
+        DateFormat('yyyy-MM-dd').format(_selectedDate) ==
+        DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+    // Hitung ringkasan
+    int hadir = 0, terlambat = 0, cuti = 0, belumAbsen = 0;
+    for (var emp in _employeeStatuses) {
+      switch (emp['status']) {
+        case 'Hadir':
+          hadir++;
+          break;
+        case 'Terlambat':
+          terlambat++;
+          break;
+        case 'Cuti':
+          cuti++;
+          break;
+        default:
+          belumAbsen++;
+      }
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Header
         Text(
-          "Monitoring Absensi Live",
+          "Monitoring Absensi",
           style: GoogleFonts.poppins(
             fontSize: 28,
             fontWeight: FontWeight.bold,
             color: Colors.indigo[900],
           ),
         ),
+        const SizedBox(height: 4),
         Text(
-          "Pantau kehadiran karyawan secara realtime (50 Data Terakhir)",
+          "Lihat status kehadiran seluruh karyawan per tanggal",
           style: GoogleFonts.poppins(fontSize: 14, color: Colors.grey[600]),
         ),
-        const SizedBox(height: 20),
-        Expanded(
-          child: Card(
-            elevation: 2,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: StreamBuilder(
-                stream: _attendanceStream,
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  final data = snapshot.data!;
-                  if (data.isEmpty) {
-                    return const Center(
-                      child: Text("Belum ada data absensi hari ini."),
-                    );
-                  }
+        const SizedBox(height: 16),
 
-                  return SizedBox(
-                    width: double.infinity,
-                    child: SingleChildScrollView(
+        // Date Picker + Summary
+        Card(
+          elevation: 1,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                // Tombol Pilih Tanggal
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.calendar_today, size: 18),
+                  label: Text(
+                    isToday
+                        ? 'Hari Ini — ${DateFormat('EEEE, dd MMMM yyyy', 'id_ID').format(_selectedDate)}'
+                        : DateFormat(
+                            'EEEE, dd MMMM yyyy',
+                            'id_ID',
+                          ).format(_selectedDate),
+                    style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                  ),
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: _selectedDate,
+                      firstDate: DateTime(2023),
+                      lastDate: DateTime.now(),
+                      helpText: 'PILIH TANGGAL',
+                    );
+                    if (picked != null) {
+                      _selectedDate = picked;
+                      _loadData();
+                    }
+                  },
+                ),
+                const SizedBox(width: 12),
+                // Tombol hari ini (shortcut)
+                if (!isToday)
+                  TextButton.icon(
+                    icon: const Icon(Icons.today, size: 18),
+                    label: const Text('Hari Ini'),
+                    onPressed: () {
+                      _selectedDate = DateTime.now();
+                      _loadData();
+                    },
+                  ),
+                const Spacer(),
+                // Summary badges
+                _buildSummaryBadge('Hadir', hadir, Colors.green),
+                const SizedBox(width: 8),
+                _buildSummaryBadge('Terlambat', terlambat, Colors.red),
+                const SizedBox(width: 8),
+                _buildSummaryBadge('Cuti', cuti, Colors.orange),
+                const SizedBox(width: 8),
+                _buildSummaryBadge('Belum', belumAbsen, Colors.grey),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // Tabel Karyawan
+        Expanded(
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _employeeStatuses.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.people_outline,
+                        size: 64,
+                        color: Colors.grey[300],
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        "Tidak ada data karyawan.",
+                        style: GoogleFonts.poppins(
+                          color: Colors.grey[500],
+                          fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : Card(
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: SingleChildScrollView(
+                    child: SizedBox(
+                      width: double.infinity,
                       child: DataTable(
                         headingRowColor: WidgetStateProperty.all(
                           Colors.indigo[50],
                         ),
-                        columnSpacing: 20,
+                        headingTextStyle: GoogleFonts.poppins(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.indigo[900],
+                          fontSize: 13,
+                        ),
+                        columnSpacing: 24,
                         columns: const [
-                          DataColumn(label: Text("Waktu")),
-                          DataColumn(label: Text("Nama")),
-                          DataColumn(label: Text("Koordinat")),
-                          DataColumn(label: Text("Status")),
-                          DataColumn(
-                            label: Text("Aksi"),
-                          ), // Kolom Baru: Tombol Peta
+                          DataColumn(label: Text('No')),
+                          DataColumn(label: Text('Nama')),
+                          DataColumn(label: Text('Jam Masuk')),
+                          DataColumn(label: Text('Status Masuk')),
+                          DataColumn(label: Text('Jam Pulang')),
+                          DataColumn(label: Text('Status Pulang')),
+                          DataColumn(label: Text('Lokasi')),
                         ],
-                        rows: data.map((item) {
-                          final profile = _profilesMap[item['user_id']] ?? {};
-                          final date = DateTime.parse(
-                            item['check_in_time'],
-                          ).toLocal();
-                          final formattedDate = DateFormat(
-                            'dd MMM HH:mm:ss',
-                            'id_ID',
-                          ).format(date);
+                        rows: _employeeStatuses.asMap().entries.map((entry) {
+                          final idx = entry.key;
+                          final emp = entry.value;
+                          final profile = emp['profile'];
+                          final attendance = emp['attendance'];
 
                           double? lat, long;
-                          String lokasiText = "-";
-
-                          if (item['location'] != null) {
+                          if (attendance != null &&
+                              attendance['location'] != null) {
                             try {
-                              final coords = item['location']['coordinates'];
+                              final coords =
+                                  attendance['location']['coordinates'];
                               long = coords[0];
                               lat = coords[1];
-                              lokasiText =
-                                  "${lat!.toStringAsFixed(5)}, ${long!.toStringAsFixed(5)}";
                             } catch (_) {}
                           }
 
                           return DataRow(
+                            color: WidgetStateProperty.resolveWith<Color?>(
+                              (states) => idx.isOdd ? Colors.grey[50] : null,
+                            ),
                             cells: [
-                              DataCell(Text(formattedDate)),
+                              DataCell(Text('${idx + 1}')),
                               DataCell(
-                                Text(
-                                  profile['full_name'] ??
-                                      'User ID: ${item['user_id'].toString().substring(0, 4)}...',
+                                Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 16,
+                                      backgroundColor: Colors.blue[100],
+                                      child: Text(
+                                        (profile['full_name'] ?? '?')
+                                            .toString()
+                                            .substring(0, 1)
+                                            .toUpperCase(),
+                                        style: TextStyle(
+                                          color: Colors.blue[800],
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      profile['full_name'] ?? '-',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                               DataCell(
                                 Text(
-                                  lokasiText,
-                                  style: const TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 12,
+                                  emp['timeText'],
+                                  style: GoogleFonts.robotoMono(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
                               ),
@@ -543,16 +853,16 @@ class _MonitoringPageState extends State<MonitoringPage> {
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 10,
-                                    vertical: 5,
+                                    vertical: 4,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.green[100],
+                                    color: emp['statusBgColor'],
                                     borderRadius: BorderRadius.circular(20),
                                   ),
                                   child: Text(
-                                    "Hadir",
+                                    emp['status'],
                                     style: TextStyle(
-                                      color: Colors.green[800],
+                                      color: emp['statusColor'],
                                       fontSize: 12,
                                       fontWeight: FontWeight.bold,
                                     ),
@@ -560,11 +870,45 @@ class _MonitoringPageState extends State<MonitoringPage> {
                                 ),
                               ),
                               DataCell(
+                                Text(
+                                  emp['checkOutTimeText'],
+                                  style: GoogleFonts.robotoMono(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                              DataCell(
+                                emp['checkOutStatus'] == '-'
+                                    ? const Text('-')
+                                    : Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: emp['checkOutBgColor'],
+                                          borderRadius: BorderRadius.circular(
+                                            20,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          emp['checkOutStatus'],
+                                          style: TextStyle(
+                                            color: emp['checkOutColor'],
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                              ),
+                              DataCell(
                                 lat != null && long != null
                                     ? IconButton(
                                         icon: const Icon(
                                           Icons.map,
                                           color: Colors.indigo,
+                                          size: 20,
                                         ),
                                         tooltip: "Lihat di Peta",
                                         onPressed: () => _showLocationDialog(
@@ -573,20 +917,50 @@ class _MonitoringPageState extends State<MonitoringPage> {
                                           profile['full_name'] ?? 'User',
                                         ),
                                       )
-                                    : const Icon(Icons.map, color: Colors.grey),
+                                    : const Icon(
+                                        Icons.location_off,
+                                        color: Colors.grey,
+                                        size: 20,
+                                      ),
                               ),
                             ],
                           );
                         }).toList(),
                       ),
                     ),
-                  );
-                },
-              ),
-            ),
-          ),
+                  ),
+                ),
         ),
       ],
+    );
+  }
+
+  Widget _buildSummaryBadge(String label, int count, MaterialColor color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color[50],
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color[200]!),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '$count',
+            style: GoogleFonts.poppins(
+              fontWeight: FontWeight.bold,
+              color: color[800],
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: GoogleFonts.poppins(color: color[700], fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -869,6 +1243,7 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
   final MapController _mapController = MapController();
   bool _isLoading = true;
   TimeOfDay _selectedStartTime = const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay _selectedEndTime = const TimeOfDay(hour: 17, minute: 0);
 
   // Posisi Marker di Peta
   latlong.LatLng _markerPosition = const latlong.LatLng(
@@ -898,6 +1273,17 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
         if (parts.length >= 2) {
           _selectedStartTime = TimeOfDay(
             hour: int.tryParse(parts[0]) ?? 9,
+            minute: int.tryParse(parts[1]) ?? 0,
+          );
+        }
+      }
+
+      // Load waktu pulang
+      if (data['end_time'] != null) {
+        final parts = data['end_time'].toString().split(':');
+        if (parts.length >= 2) {
+          _selectedEndTime = TimeOfDay(
+            hour: int.tryParse(parts[0]) ?? 17,
             minute: int.tryParse(parts[1]) ?? 0,
           );
         }
@@ -1002,6 +1388,8 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
       final radius = int.parse(_radiusCtrl.text);
       final startTime =
           '${_selectedStartTime.hour.toString().padLeft(2, '0')}:${_selectedStartTime.minute.toString().padLeft(2, '0')}:00';
+      final endTime =
+          '${_selectedEndTime.hour.toString().padLeft(2, '0')}:${_selectedEndTime.minute.toString().padLeft(2, '0')}:00';
 
       await Supabase.instance.client
           .from('offices')
@@ -1009,6 +1397,7 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
             'name': _nameCtrl.text,
             'radius_meters': radius,
             'start_time': startTime,
+            'end_time': endTime,
           })
           .eq('id', 1);
 
@@ -1153,6 +1542,39 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
                               const SizedBox(height: 10),
                               Text(
                                 'Karyawan yang check-in setelah waktu ini dihitung terlambat.',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              // Waktu Pulang (Time Picker)
+                              InkWell(
+                                onTap: () async {
+                                  final picked = await showTimePicker(
+                                    context: context,
+                                    initialTime: _selectedEndTime,
+                                    helpText: 'Pilih Waktu Pulang Kantor',
+                                  );
+                                  if (picked != null) {
+                                    setState(() => _selectedEndTime = picked);
+                                  }
+                                },
+                                child: InputDecorator(
+                                  decoration: const InputDecoration(
+                                    labelText: 'Waktu Pulang Kantor',
+                                    border: OutlineInputBorder(),
+                                    prefixIcon: Icon(Icons.logout),
+                                  ),
+                                  child: Text(
+                                    '${_selectedEndTime.hour.toString().padLeft(2, '0')}:${_selectedEndTime.minute.toString().padLeft(2, '0')}',
+                                    style: const TextStyle(fontSize: 16),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'Setelah waktu ini, sistem akan mencatat absen pulang karyawan.',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.grey[600],
@@ -1874,6 +2296,443 @@ class _EmployeePageState extends State<EmployeePage> {
     }
   }
 
+  // --- FUNGSI MANAJEMEN CUTI & DINAS ---
+  Future<void> _showLeaveDialog(Map<String, dynamic> employee) async {
+    List<dynamic> leaves = [];
+    bool isLoadingLeaves = true;
+
+    Future<List<dynamic>> fetchLeaves() async {
+      try {
+        final data = await Supabase.instance.client
+            .from('employee_leaves')
+            .select()
+            .eq('user_id', employee['id'])
+            .order('leave_date', ascending: true);
+        return data;
+      } catch (e) {
+        debugPrint('Error fetching leaves: $e');
+        return [];
+      }
+    }
+
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            if (isLoadingLeaves) {
+              fetchLeaves().then((data) {
+                setDialogState(() {
+                  leaves = data;
+                  isLoadingLeaves = false;
+                });
+              });
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  Icon(Icons.calendar_month, color: Colors.orange[700]),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Cuti & Dinas - ${employee['full_name'] ?? 'Karyawan'}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: 550,
+                height: 450,
+                child: Column(
+                  children: [
+                    // Tombol Tambah
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.add),
+                        label: const Text('Tambah Cuti / Dinas'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        onPressed: () async {
+                          // 1. Pilih tanggal
+                          final selectedDate = await showDatePicker(
+                            context: ctx,
+                            initialDate: DateTime.now(),
+                            firstDate: DateTime(2023),
+                            lastDate: DateTime(2030),
+                            helpText: 'PILIH TANGGAL',
+                          );
+                          if (selectedDate == null || !ctx.mounted) return;
+
+                          // 2. Dialog detail: tipe + alasan + waktu dinas
+                          String selectedType = 'cuti';
+                          final reasonCtrl = TextEditingController();
+                          TimeOfDay tripStart = const TimeOfDay(hour: 7, minute: 0);
+                          TimeOfDay tripEnd = const TimeOfDay(hour: 17, minute: 0);
+
+                          final confirmed = await showDialog<bool>(
+                            context: ctx,
+                            builder: (ctx2) {
+                              return StatefulBuilder(
+                                builder: (ctx2, setInnerState) {
+                                  return AlertDialog(
+                                    title: const Text('Detail Cuti / Dinas'),
+                                    content: SingleChildScrollView(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          // Dropdown tipe
+                                          DropdownButtonFormField<String>(
+                                            value: selectedType,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Tipe',
+                                              border: OutlineInputBorder(),
+                                              prefixIcon: Icon(Icons.category),
+                                            ),
+                                            items: const [
+                                              DropdownMenuItem(
+                                                value: 'cuti',
+                                                child: Text('🟠 Cuti (Libur Penuh)'),
+                                              ),
+                                              DropdownMenuItem(
+                                                value: 'dinas',
+                                                child: Text('🔵 Perjalanan Dinas'),
+                                              ),
+                                            ],
+                                            onChanged: (val) {
+                                              setInnerState(() => selectedType = val!);
+                                            },
+                                          ),
+                                          const SizedBox(height: 16),
+                                          // Alasan
+                                          TextField(
+                                            controller: reasonCtrl,
+                                            decoration: InputDecoration(
+                                              labelText: selectedType == 'cuti'
+                                                  ? 'Keterangan (misal: Cuti Sakit)'
+                                                  : 'Keterangan (misal: Meeting Jakarta)',
+                                              border: const OutlineInputBorder(),
+                                              prefixIcon: const Icon(Icons.notes),
+                                            ),
+                                          ),
+                                          // Time pickers untuk Dinas
+                                          if (selectedType == 'dinas') ...[
+                                            const SizedBox(height: 16),
+                                            const Text(
+                                              'Waktu Perjalanan Dinas:',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 14,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Row(
+                                              children: [
+                                                Expanded(
+                                                  child: InkWell(
+                                                    onTap: () async {
+                                                      final picked = await showTimePicker(
+                                                        context: ctx2,
+                                                        initialTime: tripStart,
+                                                        helpText: 'Jam Mulai Dinas',
+                                                      );
+                                                      if (picked != null) {
+                                                        setInnerState(() => tripStart = picked);
+                                                      }
+                                                    },
+                                                    child: InputDecorator(
+                                                      decoration: const InputDecoration(
+                                                        labelText: 'Jam Mulai',
+                                                        border: OutlineInputBorder(),
+                                                        prefixIcon: Icon(Icons.login),
+                                                      ),
+                                                      child: Text(
+                                                        '${tripStart.hour.toString().padLeft(2, '0')}:${tripStart.minute.toString().padLeft(2, '0')}',
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 12),
+                                                Expanded(
+                                                  child: InkWell(
+                                                    onTap: () async {
+                                                      final picked = await showTimePicker(
+                                                        context: ctx2,
+                                                        initialTime: tripEnd,
+                                                        helpText: 'Jam Selesai Dinas',
+                                                      );
+                                                      if (picked != null) {
+                                                        setInnerState(() => tripEnd = picked);
+                                                      }
+                                                    },
+                                                    child: InputDecorator(
+                                                      decoration: const InputDecoration(
+                                                        labelText: 'Jam Selesai',
+                                                        border: OutlineInputBorder(),
+                                                        prefixIcon: Icon(Icons.logout),
+                                                      ),
+                                                      child: Text(
+                                                        '${tripEnd.hour.toString().padLeft(2, '0')}:${tripEnd.minute.toString().padLeft(2, '0')}',
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              'Jika dinas mencakup jam masuk → absen masuk di-skip.\n'
+                                              'Jika dinas mencakup jam pulang → absen pulang di-skip.',
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.grey[600],
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(ctx2, false),
+                                        child: const Text('Batal'),
+                                      ),
+                                      ElevatedButton(
+                                        onPressed: () => Navigator.pop(ctx2, true),
+                                        child: const Text('Simpan'),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              );
+                            },
+                          );
+
+                          // 3. Simpan ke Supabase
+                          if (confirmed == true && reasonCtrl.text.isNotEmpty) {
+                            try {
+                              final insertData = <String, dynamic>{
+                                'user_id': employee['id'],
+                                'leave_date': DateFormat('yyyy-MM-dd').format(selectedDate),
+                                'reason': reasonCtrl.text.trim(),
+                                'type': selectedType,
+                              };
+                              if (selectedType == 'dinas') {
+                                insertData['trip_start_time'] =
+                                    '${tripStart.hour.toString().padLeft(2, '0')}:${tripStart.minute.toString().padLeft(2, '0')}:00';
+                                insertData['trip_end_time'] =
+                                    '${tripEnd.hour.toString().padLeft(2, '0')}:${tripEnd.minute.toString().padLeft(2, '0')}:00';
+                              }
+                              await Supabase.instance.client
+                                  .from('employee_leaves')
+                                  .insert(insertData);
+                              final updated = await fetchLeaves();
+                              setDialogState(() {
+                                leaves = updated;
+                              });
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      selectedType == 'cuti'
+                                          ? 'Cuti berhasil ditambahkan'
+                                          : 'Dinas berhasil ditambahkan',
+                                    ),
+                                  ),
+                                );
+                              }
+                            } catch (e) {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Gagal: $e')),
+                                );
+                              }
+                            }
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Divider(),
+                    // List Cuti & Dinas
+                    Expanded(
+                      child: isLoadingLeaves
+                          ? const Center(child: CircularProgressIndicator())
+                          : leaves.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    'Belum ada data cuti / dinas.',
+                                    style: TextStyle(color: Colors.grey),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  itemCount: leaves.length,
+                                  itemBuilder: (context, index) {
+                                    final leave = leaves[index];
+                                    final date = DateTime.parse(leave['leave_date']);
+                                    final formattedDate = DateFormat(
+                                      'EEEE, dd MMMM yyyy',
+                                      'id_ID',
+                                    ).format(date);
+                                    final isPast = date.isBefore(
+                                      DateTime.now().subtract(const Duration(days: 1)),
+                                    );
+                                    final type = leave['type'] ?? 'cuti';
+                                    final isDinas = type == 'dinas';
+
+                                    // Build subtitle
+                                    String subtitle = leave['reason'] ?? '';
+                                    if (isDinas && leave['trip_start_time'] != null && leave['trip_end_time'] != null) {
+                                      final start = leave['trip_start_time'].toString().substring(0, 5);
+                                      final end = leave['trip_end_time'].toString().substring(0, 5);
+                                      subtitle = '⏰ $start – $end  •  $subtitle';
+                                    }
+
+                                    return ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundColor: isPast
+                                            ? Colors.grey[200]
+                                            : isDinas
+                                                ? Colors.blue[100]
+                                                : Colors.orange[100],
+                                        child: Icon(
+                                          isDinas ? Icons.flight_takeoff : Icons.event_busy,
+                                          color: isPast
+                                              ? Colors.grey
+                                              : isDinas
+                                                  ? Colors.blue[700]
+                                                  : Colors.orange[700],
+                                          size: 20,
+                                        ),
+                                      ),
+                                      title: Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 6,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: isPast
+                                                  ? Colors.grey[200]
+                                                  : isDinas
+                                                      ? Colors.blue[50]
+                                                      : Colors.orange[50],
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Text(
+                                              isDinas ? 'DINAS' : 'CUTI',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                                color: isPast
+                                                    ? Colors.grey
+                                                    : isDinas
+                                                        ? Colors.blue[700]
+                                                        : Colors.orange[700],
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              formattedDate,
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 13,
+                                                color: isPast ? Colors.grey : Colors.black,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      subtitle: Text(
+                                        subtitle,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: isPast ? Colors.grey : Colors.black87,
+                                        ),
+                                      ),
+                                      trailing: IconButton(
+                                        icon: const Icon(
+                                          Icons.delete,
+                                          color: Colors.redAccent,
+                                          size: 20,
+                                        ),
+                                        tooltip: 'Hapus',
+                                        onPressed: () async {
+                                          final confirmDel = await showDialog<bool>(
+                                            context: ctx,
+                                            builder: (ctx3) => AlertDialog(
+                                              title: Text('Hapus ${isDinas ? 'Dinas' : 'Cuti'}?'),
+                                              content: Text(
+                                                'Hapus ${isDinas ? 'dinas' : 'cuti'} tanggal $formattedDate?',
+                                              ),
+                                              actions: [
+                                                TextButton(
+                                                  onPressed: () => Navigator.pop(ctx3, false),
+                                                  child: const Text('Batal'),
+                                                ),
+                                                ElevatedButton(
+                                                  style: ElevatedButton.styleFrom(
+                                                    backgroundColor: Colors.red,
+                                                    foregroundColor: Colors.white,
+                                                  ),
+                                                  onPressed: () => Navigator.pop(ctx3, true),
+                                                  child: const Text('Hapus'),
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                          if (confirmDel == true) {
+                                            try {
+                                              await Supabase.instance.client
+                                                  .from('employee_leaves')
+                                                  .delete()
+                                                  .eq('id', leave['id']);
+                                              final updated = await fetchLeaves();
+                                              setDialogState(() {
+                                                leaves = updated;
+                                              });
+                                            } catch (e) {
+                                              if (ctx.mounted) {
+                                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                                  SnackBar(content: Text('Gagal menghapus: $e')),
+                                                );
+                                              }
+                                            }
+                                          }
+                                        },
+                                      ),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Tutup'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -1993,6 +2852,7 @@ class _EmployeePageState extends State<EmployeePage> {
                           DataColumn(label: Text('Nama Lengkap')),
                           DataColumn(label: Text('Email')),
                           DataColumn(label: Text('Role')),
+                          DataColumn(label: Text('Cuti')),
                           DataColumn(label: Text('Aksi')),
                         ],
                         rows: _filtered.asMap().entries.map((entry) {
@@ -2064,6 +2924,19 @@ class _EmployeePageState extends State<EmployeePage> {
                               ),
                               DataCell(
                                 isAdmin
+                                    ? const SizedBox.shrink()
+                                    : IconButton(
+                                        icon: Icon(
+                                          Icons.calendar_month,
+                                          color: Colors.orange[700],
+                                          size: 20,
+                                        ),
+                                        tooltip: 'Atur Cuti',
+                                        onPressed: () => _showLeaveDialog(emp),
+                                      ),
+                              ),
+                              DataCell(
+                                isAdmin
                                     ? const Tooltip(
                                         message: 'Admin tidak bisa dihapus',
                                         child: Icon(
@@ -2091,6 +2964,247 @@ class _EmployeePageState extends State<EmployeePage> {
                 ),
         ),
       ],
+    );
+  }
+}
+
+// --- 6. HALAMAN MANAJEMEN HARI LIBUR ---
+class HolidayManagementPage extends StatefulWidget {
+  const HolidayManagementPage({super.key});
+
+  @override
+  State<HolidayManagementPage> createState() => _HolidayManagementPageState();
+}
+
+class _HolidayManagementPageState extends State<HolidayManagementPage> {
+  List<dynamic> _holidays = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchHolidays();
+  }
+
+  Future<void> _fetchHolidays() async {
+    setState(() => _isLoading = true);
+    try {
+      final data = await Supabase.instance.client
+          .from('holidays')
+          .select()
+          .order('holiday_date', ascending: true);
+      setState(() => _holidays = data);
+    } catch (e) {
+      debugPrint("Error fetching holidays: $e");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _addHoliday() async {
+    // 1. Pilih Tanggal
+    final selectedDate = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2023),
+      lastDate: DateTime(2030),
+      helpText: "PILIH TANGGAL LIBUR",
+    );
+
+    if (selectedDate == null || !mounted) return;
+
+    // 2. Isi Keterangan
+    final descCtrl = TextEditingController();
+    final isConfirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Keterangan Libur"),
+        content: TextField(
+          controller: descCtrl,
+          decoration: const InputDecoration(
+            labelText: "Contoh: Idul Fitri / Libur Nasional",
+            border: OutlineInputBorder(),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Batal"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Simpan"),
+          ),
+        ],
+      ),
+    );
+
+    // 3. Simpan ke Supabase
+    if (isConfirmed == true && descCtrl.text.isNotEmpty) {
+      try {
+        await Supabase.instance.client.from('holidays').insert({
+          'holiday_date': DateFormat('yyyy-MM-dd').format(selectedDate),
+          'description': descCtrl.text.trim(),
+        });
+        _fetchHolidays();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Hari Libur Berhasil Ditambahkan")),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Gagal (Mungkin tanggal sudah ada): $e")),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _deleteHoliday(int id) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Hapus Hari Libur?"),
+        content: const Text(
+          "Apakah Anda yakin ingin menghapus jadwal libur ini?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Batal"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Hapus"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await Supabase.instance.client.from('holidays').delete().eq('id', id);
+        _fetchHolidays();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text("Gagal menghapus: $e")));
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                "Pengaturan Hari Libur",
+                style: GoogleFonts.poppins(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.indigo[900],
+                ),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.add),
+                label: const Text("Tambah Hari Libur"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 15,
+                  ),
+                ),
+                onPressed: _addHoliday,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            "Pada tanggal yang terdaftar di bawah ini, karyawan tidak perlu melakukan absensi.",
+            style: TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 20),
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _holidays.isEmpty
+                ? const Center(
+                    child: Text(
+                      "Belum ada jadwal hari libur yang ditambahkan.",
+                    ),
+                  )
+                : Card(
+                    child: ListView.builder(
+                      itemCount: _holidays.length,
+                      itemBuilder: (context, index) {
+                        final item = _holidays[index];
+                        // Format Tanggal
+                        final date = DateTime.parse(item['holiday_date']);
+                        final formattedDate = DateFormat(
+                          'EEEE, dd MMMM yyyy',
+                          'id_ID',
+                        ).format(date);
+
+                        // Beri indikator jika tanggal libur sudah lewat
+                        final isPast = date.isBefore(
+                          DateTime.now().subtract(const Duration(days: 1)),
+                        );
+
+                        return ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: isPast
+                                ? Colors.grey[300]
+                                : Colors.red[100],
+                            child: Icon(
+                              Icons.event_busy,
+                              color: isPast ? Colors.grey : Colors.red,
+                            ),
+                          ),
+                          title: Text(
+                            formattedDate,
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: isPast ? Colors.grey : Colors.black,
+                            ),
+                          ),
+                          subtitle: Text(
+                            item['description'],
+                            style: TextStyle(
+                              color: isPast ? Colors.grey : Colors.black87,
+                            ),
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(
+                              Icons.delete,
+                              color: Colors.redAccent,
+                            ),
+                            onPressed: () => _deleteHoliday(item['id']),
+                            tooltip: "Hapus Libur",
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
