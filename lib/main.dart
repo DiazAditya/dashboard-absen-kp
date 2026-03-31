@@ -11,17 +11,16 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' as latlong;
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // --- KONFIGURASI SUPABASE ---
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('id_ID', null);
-  await dotenv.load(fileName: '.env');
 
-  final supabaseUrl = dotenv.env['SUPABASE_URL'] ?? '';
-  final supabaseKey = dotenv.env['SUPABASE_KEY'] ?? '';
+  // Ambil credentials dari --dart-define (lokal & Vercel)
+  const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+  const supabaseKey = String.fromEnvironment('SUPABASE_KEY');
 
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseKey);
 
@@ -452,10 +451,12 @@ class _MonitoringPageState extends State<MonitoringPage> {
       // Helper: parse TIME string "HH:mm:ss" to minutes
       int timeToMinutes(String timeStr) {
         final parts = timeStr.split(':');
-        return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+        return (int.tryParse(parts[0]) ?? 0) * 60 +
+            (int.tryParse(parts[1]) ?? 0);
       }
 
-      final officeStartMin = _officeStartTime.hour * 60 + _officeStartTime.minute;
+      final officeStartMin =
+          _officeStartTime.hour * 60 + _officeStartTime.minute;
       final officeEndMin = _officeEndTime.hour * 60 + _officeEndTime.minute;
 
       final List<Map<String, dynamic>> result = [];
@@ -487,9 +488,14 @@ class _MonitoringPageState extends State<MonitoringPage> {
             skipLabel = 'Cuti';
           } else if (type == 'dinas') {
             skipLabel = 'Dinas';
-            if (leaveEntry['trip_start_time'] != null && leaveEntry['trip_end_time'] != null) {
-              final tripStartMin = timeToMinutes(leaveEntry['trip_start_time'].toString());
-              final tripEndMin = timeToMinutes(leaveEntry['trip_end_time'].toString());
+            if (leaveEntry['trip_start_time'] != null &&
+                leaveEntry['trip_end_time'] != null) {
+              final tripStartMin = timeToMinutes(
+                leaveEntry['trip_start_time'].toString(),
+              );
+              final tripEndMin = timeToMinutes(
+                leaveEntry['trip_end_time'].toString(),
+              );
               if (tripStartMin <= officeStartMin) skipCheckIn = true;
               if (tripEndMin >= officeEndMin) skipCheckOut = true;
             }
@@ -499,10 +505,16 @@ class _MonitoringPageState extends State<MonitoringPage> {
         // === Status Masuk ===
         if (skipCheckIn) {
           status = skipLabel;
-          statusColor = skipLabel == 'Cuti' ? Colors.orange[800]! : Colors.blue[800]!;
-          statusBgColor = skipLabel == 'Cuti' ? Colors.orange[50]! : Colors.blue[50]!;
+          statusColor = skipLabel == 'Cuti'
+              ? Colors.orange[800]!
+              : Colors.blue[800]!;
+          statusBgColor = skipLabel == 'Cuti'
+              ? Colors.orange[50]!
+              : Colors.blue[50]!;
         } else if (attendance != null) {
-          final checkInTime = DateTime.parse(attendance['check_in_time']).toLocal();
+          final checkInTime = DateTime.parse(
+            attendance['check_in_time'],
+          ).toLocal();
           timeText = DateFormat('HH:mm:ss').format(checkInTime);
           final actualMinutes = checkInTime.hour * 60 + checkInTime.minute;
 
@@ -524,10 +536,16 @@ class _MonitoringPageState extends State<MonitoringPage> {
         // === Status Pulang ===
         if (skipCheckOut) {
           checkOutStatus = skipLabel;
-          checkOutColor = skipLabel == 'Cuti' ? Colors.orange[800]! : Colors.blue[800]!;
-          checkOutBgColor = skipLabel == 'Cuti' ? Colors.orange[50]! : Colors.blue[50]!;
+          checkOutColor = skipLabel == 'Cuti'
+              ? Colors.orange[800]!
+              : Colors.blue[800]!;
+          checkOutBgColor = skipLabel == 'Cuti'
+              ? Colors.orange[50]!
+              : Colors.blue[50]!;
         } else if (attendance != null && attendance['check_out_time'] != null) {
-          final checkOutTime = DateTime.parse(attendance['check_out_time']).toLocal();
+          final checkOutTime = DateTime.parse(
+            attendance['check_out_time'],
+          ).toLocal();
           checkOutTimeText = DateFormat('HH:mm:ss').format(checkOutTime);
           final outMinutes = checkOutTime.hour * 60 + checkOutTime.minute;
 
@@ -2375,8 +2393,14 @@ class _EmployeePageState extends State<EmployeePage> {
                           // 2. Dialog detail: tipe + alasan + waktu dinas
                           String selectedType = 'cuti';
                           final reasonCtrl = TextEditingController();
-                          TimeOfDay tripStart = const TimeOfDay(hour: 7, minute: 0);
-                          TimeOfDay tripEnd = const TimeOfDay(hour: 17, minute: 0);
+                          TimeOfDay tripStart = const TimeOfDay(
+                            hour: 7,
+                            minute: 0,
+                          );
+                          TimeOfDay tripEnd = const TimeOfDay(
+                            hour: 17,
+                            minute: 0,
+                          );
 
                           final confirmed = await showDialog<bool>(
                             context: ctx,
@@ -2388,11 +2412,12 @@ class _EmployeePageState extends State<EmployeePage> {
                                     content: SingleChildScrollView(
                                       child: Column(
                                         mainAxisSize: MainAxisSize.min,
-                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
                                         children: [
                                           // Dropdown tipe
                                           DropdownButtonFormField<String>(
-                                            value: selectedType,
+                                            initialValue: selectedType,
                                             decoration: const InputDecoration(
                                               labelText: 'Tipe',
                                               border: OutlineInputBorder(),
@@ -2401,15 +2426,21 @@ class _EmployeePageState extends State<EmployeePage> {
                                             items: const [
                                               DropdownMenuItem(
                                                 value: 'cuti',
-                                                child: Text('🟠 Cuti (Libur Penuh)'),
+                                                child: Text(
+                                                  '🟠 Cuti (Libur Penuh)',
+                                                ),
                                               ),
                                               DropdownMenuItem(
                                                 value: 'dinas',
-                                                child: Text('🔵 Perjalanan Dinas'),
+                                                child: Text(
+                                                  '🔵 Perjalanan Dinas',
+                                                ),
                                               ),
                                             ],
                                             onChanged: (val) {
-                                              setInnerState(() => selectedType = val!);
+                                              setInnerState(
+                                                () => selectedType = val!,
+                                              );
                                             },
                                           ),
                                           const SizedBox(height: 16),
@@ -2420,8 +2451,11 @@ class _EmployeePageState extends State<EmployeePage> {
                                               labelText: selectedType == 'cuti'
                                                   ? 'Keterangan (misal: Cuti Sakit)'
                                                   : 'Keterangan (misal: Meeting Jakarta)',
-                                              border: const OutlineInputBorder(),
-                                              prefixIcon: const Icon(Icons.notes),
+                                              border:
+                                                  const OutlineInputBorder(),
+                                              prefixIcon: const Icon(
+                                                Icons.notes,
+                                              ),
                                             ),
                                           ),
                                           // Time pickers untuk Dinas
@@ -2440,21 +2474,32 @@ class _EmployeePageState extends State<EmployeePage> {
                                                 Expanded(
                                                   child: InkWell(
                                                     onTap: () async {
-                                                      final picked = await showTimePicker(
-                                                        context: ctx2,
-                                                        initialTime: tripStart,
-                                                        helpText: 'Jam Mulai Dinas',
-                                                      );
+                                                      final picked =
+                                                          await showTimePicker(
+                                                            context: ctx2,
+                                                            initialTime:
+                                                                tripStart,
+                                                            helpText:
+                                                                'Jam Mulai Dinas',
+                                                          );
                                                       if (picked != null) {
-                                                        setInnerState(() => tripStart = picked);
+                                                        setInnerState(
+                                                          () => tripStart =
+                                                              picked,
+                                                        );
                                                       }
                                                     },
                                                     child: InputDecorator(
-                                                      decoration: const InputDecoration(
-                                                        labelText: 'Jam Mulai',
-                                                        border: OutlineInputBorder(),
-                                                        prefixIcon: Icon(Icons.login),
-                                                      ),
+                                                      decoration:
+                                                          const InputDecoration(
+                                                            labelText:
+                                                                'Jam Mulai',
+                                                            border:
+                                                                OutlineInputBorder(),
+                                                            prefixIcon: Icon(
+                                                              Icons.login,
+                                                            ),
+                                                          ),
                                                       child: Text(
                                                         '${tripStart.hour.toString().padLeft(2, '0')}:${tripStart.minute.toString().padLeft(2, '0')}',
                                                       ),
@@ -2465,21 +2510,32 @@ class _EmployeePageState extends State<EmployeePage> {
                                                 Expanded(
                                                   child: InkWell(
                                                     onTap: () async {
-                                                      final picked = await showTimePicker(
-                                                        context: ctx2,
-                                                        initialTime: tripEnd,
-                                                        helpText: 'Jam Selesai Dinas',
-                                                      );
+                                                      final picked =
+                                                          await showTimePicker(
+                                                            context: ctx2,
+                                                            initialTime:
+                                                                tripEnd,
+                                                            helpText:
+                                                                'Jam Selesai Dinas',
+                                                          );
                                                       if (picked != null) {
-                                                        setInnerState(() => tripEnd = picked);
+                                                        setInnerState(
+                                                          () =>
+                                                              tripEnd = picked,
+                                                        );
                                                       }
                                                     },
                                                     child: InputDecorator(
-                                                      decoration: const InputDecoration(
-                                                        labelText: 'Jam Selesai',
-                                                        border: OutlineInputBorder(),
-                                                        prefixIcon: Icon(Icons.logout),
-                                                      ),
+                                                      decoration:
+                                                          const InputDecoration(
+                                                            labelText:
+                                                                'Jam Selesai',
+                                                            border:
+                                                                OutlineInputBorder(),
+                                                            prefixIcon: Icon(
+                                                              Icons.logout,
+                                                            ),
+                                                          ),
                                                       child: Text(
                                                         '${tripEnd.hour.toString().padLeft(2, '0')}:${tripEnd.minute.toString().padLeft(2, '0')}',
                                                       ),
@@ -2503,11 +2559,13 @@ class _EmployeePageState extends State<EmployeePage> {
                                     ),
                                     actions: [
                                       TextButton(
-                                        onPressed: () => Navigator.pop(ctx2, false),
+                                        onPressed: () =>
+                                            Navigator.pop(ctx2, false),
                                         child: const Text('Batal'),
                                       ),
                                       ElevatedButton(
-                                        onPressed: () => Navigator.pop(ctx2, true),
+                                        onPressed: () =>
+                                            Navigator.pop(ctx2, true),
                                         child: const Text('Simpan'),
                                       ),
                                     ],
@@ -2522,7 +2580,9 @@ class _EmployeePageState extends State<EmployeePage> {
                             try {
                               final insertData = <String, dynamic>{
                                 'user_id': employee['id'],
-                                'leave_date': DateFormat('yyyy-MM-dd').format(selectedDate),
+                                'leave_date': DateFormat(
+                                  'yyyy-MM-dd',
+                                ).format(selectedDate),
                                 'reason': reasonCtrl.text.trim(),
                                 'type': selectedType,
                               };
@@ -2568,154 +2628,182 @@ class _EmployeePageState extends State<EmployeePage> {
                       child: isLoadingLeaves
                           ? const Center(child: CircularProgressIndicator())
                           : leaves.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    'Belum ada data cuti / dinas.',
-                                    style: TextStyle(color: Colors.grey),
+                          ? const Center(
+                              child: Text(
+                                'Belum ada data cuti / dinas.',
+                                style: TextStyle(color: Colors.grey),
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: leaves.length,
+                              itemBuilder: (context, index) {
+                                final leave = leaves[index];
+                                final date = DateTime.parse(
+                                  leave['leave_date'],
+                                );
+                                final formattedDate = DateFormat(
+                                  'EEEE, dd MMMM yyyy',
+                                  'id_ID',
+                                ).format(date);
+                                final isPast = date.isBefore(
+                                  DateTime.now().subtract(
+                                    const Duration(days: 1),
                                   ),
-                                )
-                              : ListView.builder(
-                                  itemCount: leaves.length,
-                                  itemBuilder: (context, index) {
-                                    final leave = leaves[index];
-                                    final date = DateTime.parse(leave['leave_date']);
-                                    final formattedDate = DateFormat(
-                                      'EEEE, dd MMMM yyyy',
-                                      'id_ID',
-                                    ).format(date);
-                                    final isPast = date.isBefore(
-                                      DateTime.now().subtract(const Duration(days: 1)),
-                                    );
-                                    final type = leave['type'] ?? 'cuti';
-                                    final isDinas = type == 'dinas';
+                                );
+                                final type = leave['type'] ?? 'cuti';
+                                final isDinas = type == 'dinas';
 
-                                    // Build subtitle
-                                    String subtitle = leave['reason'] ?? '';
-                                    if (isDinas && leave['trip_start_time'] != null && leave['trip_end_time'] != null) {
-                                      final start = leave['trip_start_time'].toString().substring(0, 5);
-                                      final end = leave['trip_end_time'].toString().substring(0, 5);
-                                      subtitle = '⏰ $start – $end  •  $subtitle';
-                                    }
+                                // Build subtitle
+                                String subtitle = leave['reason'] ?? '';
+                                if (isDinas &&
+                                    leave['trip_start_time'] != null &&
+                                    leave['trip_end_time'] != null) {
+                                  final start = leave['trip_start_time']
+                                      .toString()
+                                      .substring(0, 5);
+                                  final end = leave['trip_end_time']
+                                      .toString()
+                                      .substring(0, 5);
+                                  subtitle = '⏰ $start – $end  •  $subtitle';
+                                }
 
-                                    return ListTile(
-                                      leading: CircleAvatar(
-                                        backgroundColor: isPast
-                                            ? Colors.grey[200]
-                                            : isDinas
-                                                ? Colors.blue[100]
-                                                : Colors.orange[100],
-                                        child: Icon(
-                                          isDinas ? Icons.flight_takeoff : Icons.event_busy,
+                                return ListTile(
+                                  leading: CircleAvatar(
+                                    backgroundColor: isPast
+                                        ? Colors.grey[200]
+                                        : isDinas
+                                        ? Colors.blue[100]
+                                        : Colors.orange[100],
+                                    child: Icon(
+                                      isDinas
+                                          ? Icons.flight_takeoff
+                                          : Icons.event_busy,
+                                      color: isPast
+                                          ? Colors.grey
+                                          : isDinas
+                                          ? Colors.blue[700]
+                                          : Colors.orange[700],
+                                      size: 20,
+                                    ),
+                                  ),
+                                  title: Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
                                           color: isPast
-                                              ? Colors.grey
+                                              ? Colors.grey[200]
                                               : isDinas
-                                                  ? Colors.blue[700]
-                                                  : Colors.orange[700],
-                                          size: 20,
-                                        ),
-                                      ),
-                                      title: Row(
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 6,
-                                              vertical: 2,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: isPast
-                                                  ? Colors.grey[200]
-                                                  : isDinas
-                                                      ? Colors.blue[50]
-                                                      : Colors.orange[50],
-                                              borderRadius: BorderRadius.circular(6),
-                                            ),
-                                            child: Text(
-                                              isDinas ? 'DINAS' : 'CUTI',
-                                              style: TextStyle(
-                                                fontSize: 10,
-                                                fontWeight: FontWeight.bold,
-                                                color: isPast
-                                                    ? Colors.grey
-                                                    : isDinas
-                                                        ? Colors.blue[700]
-                                                        : Colors.orange[700],
-                                              ),
-                                            ),
+                                              ? Colors.blue[50]
+                                              : Colors.orange[50],
+                                          borderRadius: BorderRadius.circular(
+                                            6,
                                           ),
-                                          const SizedBox(width: 8),
-                                          Expanded(
-                                            child: Text(
-                                              formattedDate,
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.w600,
-                                                fontSize: 13,
-                                                color: isPast ? Colors.grey : Colors.black,
-                                              ),
-                                            ),
+                                        ),
+                                        child: Text(
+                                          isDinas ? 'DINAS' : 'CUTI',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold,
+                                            color: isPast
+                                                ? Colors.grey
+                                                : isDinas
+                                                ? Colors.blue[700]
+                                                : Colors.orange[700],
                                           ),
-                                        ],
-                                      ),
-                                      subtitle: Text(
-                                        subtitle,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: isPast ? Colors.grey : Colors.black87,
                                         ),
                                       ),
-                                      trailing: IconButton(
-                                        icon: const Icon(
-                                          Icons.delete,
-                                          color: Colors.redAccent,
-                                          size: 20,
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          formattedDate,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 13,
+                                            color: isPast
+                                                ? Colors.grey
+                                                : Colors.black,
+                                          ),
                                         ),
-                                        tooltip: 'Hapus',
-                                        onPressed: () async {
-                                          final confirmDel = await showDialog<bool>(
-                                            context: ctx,
-                                            builder: (ctx3) => AlertDialog(
-                                              title: Text('Hapus ${isDinas ? 'Dinas' : 'Cuti'}?'),
-                                              content: Text(
-                                                'Hapus ${isDinas ? 'dinas' : 'cuti'} tanggal $formattedDate?',
-                                              ),
-                                              actions: [
-                                                TextButton(
-                                                  onPressed: () => Navigator.pop(ctx3, false),
-                                                  child: const Text('Batal'),
-                                                ),
-                                                ElevatedButton(
-                                                  style: ElevatedButton.styleFrom(
-                                                    backgroundColor: Colors.red,
-                                                    foregroundColor: Colors.white,
-                                                  ),
-                                                  onPressed: () => Navigator.pop(ctx3, true),
-                                                  child: const Text('Hapus'),
-                                                ),
-                                              ],
+                                      ),
+                                    ],
+                                  ),
+                                  subtitle: Text(
+                                    subtitle,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: isPast
+                                          ? Colors.grey
+                                          : Colors.black87,
+                                    ),
+                                  ),
+                                  trailing: IconButton(
+                                    icon: const Icon(
+                                      Icons.delete,
+                                      color: Colors.redAccent,
+                                      size: 20,
+                                    ),
+                                    tooltip: 'Hapus',
+                                    onPressed: () async {
+                                      final confirmDel = await showDialog<bool>(
+                                        context: ctx,
+                                        builder: (ctx3) => AlertDialog(
+                                          title: Text(
+                                            'Hapus ${isDinas ? 'Dinas' : 'Cuti'}?',
+                                          ),
+                                          content: Text(
+                                            'Hapus ${isDinas ? 'dinas' : 'cuti'} tanggal $formattedDate?',
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(ctx3, false),
+                                              child: const Text('Batal'),
                                             ),
-                                          );
-                                          if (confirmDel == true) {
-                                            try {
-                                              await Supabase.instance.client
-                                                  .from('employee_leaves')
-                                                  .delete()
-                                                  .eq('id', leave['id']);
-                                              final updated = await fetchLeaves();
-                                              setDialogState(() {
-                                                leaves = updated;
-                                              });
-                                            } catch (e) {
-                                              if (ctx.mounted) {
-                                                ScaffoldMessenger.of(ctx).showSnackBar(
-                                                  SnackBar(content: Text('Gagal menghapus: $e')),
-                                                );
-                                              }
-                                            }
+                                            ElevatedButton(
+                                              style: ElevatedButton.styleFrom(
+                                                backgroundColor: Colors.red,
+                                                foregroundColor: Colors.white,
+                                              ),
+                                              onPressed: () =>
+                                                  Navigator.pop(ctx3, true),
+                                              child: const Text('Hapus'),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                      if (confirmDel == true) {
+                                        try {
+                                          await Supabase.instance.client
+                                              .from('employee_leaves')
+                                              .delete()
+                                              .eq('id', leave['id']);
+                                          final updated = await fetchLeaves();
+                                          setDialogState(() {
+                                            leaves = updated;
+                                          });
+                                        } catch (e) {
+                                          if (ctx.mounted) {
+                                            ScaffoldMessenger.of(
+                                              ctx,
+                                            ).showSnackBar(
+                                              SnackBar(
+                                                content: Text(
+                                                  'Gagal menghapus: $e',
+                                                ),
+                                              ),
+                                            );
                                           }
-                                        },
-                                      ),
-                                    );
-                                  },
-                                ),
+                                        }
+                                      }
+                                    },
+                                  ),
+                                );
+                              },
+                            ),
                     ),
                   ],
                 ),
