@@ -2410,6 +2410,7 @@ class _EmployeePageState extends State<EmployeePage> {
       final data = await Supabase.instance.client
           .from('profiles')
           .select()
+          .eq('role', 'employee')
           .order('full_name', ascending: true);
       setState(() {
         _employees = data;
