@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -11,14 +12,17 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' as latlong;
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
+//import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // --- KONFIGURASI SUPABASE ---
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('id_ID', null);
+  /*await dotenv.load(fileName: '.env');
 
-  // Ambil credentials dari --dart-define (lokal & Vercel)
+  final supabaseUrl = dotenv.env['SUPABASE_URL'] ?? '';
+  final supabaseKey = dotenv.env['SUPABASE_KEY'] ?? '';*/
   const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
   const supabaseKey = String.fromEnvironment('SUPABASE_KEY');
 
@@ -819,8 +823,8 @@ class _MonitoringPageState extends State<MonitoringPage> {
                             try {
                               final coords =
                                   attendance['location']['coordinates'];
-                              long = coords[0];
-                              lat = coords[1];
+                              long = double.tryParse(coords[0].toString());
+                              lat = double.tryParse(coords[1].toString());
                             } catch (_) {}
                           }
 
@@ -1192,8 +1196,16 @@ class _HistoryPageState extends State<HistoryPage> {
                           if (item['location'] != null) {
                             try {
                               final coords = item['location']['coordinates'];
-                              lokasi =
-                                  "${coords[1].toStringAsFixed(5)}, ${coords[0].toStringAsFixed(5)}";
+                              final cLat = double.tryParse(
+                                coords[1].toString(),
+                              );
+                              final cLon = double.tryParse(
+                                coords[0].toString(),
+                              );
+                              if (cLat != null && cLon != null) {
+                                lokasi =
+                                    "${cLat.toStringAsFixed(5)}, ${cLon.toStringAsFixed(5)}";
+                              }
                             } catch (_) {}
                           }
                           return DataRow(
@@ -1263,16 +1275,53 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
   TimeOfDay _selectedStartTime = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _selectedEndTime = const TimeOfDay(hour: 17, minute: 0);
 
+  // Autocomplete suggestions
+  List<Map<String, dynamic>> _suggestions = [];
+  bool _showSuggestions = false;
+  bool _isSuggestionLoading = false;
+  Timer? _debounce;
+
   // Posisi Marker di Peta
-  latlong.LatLng _markerPosition = const latlong.LatLng(
-    -6.175392,
-    106.827153,
-  ); // Default Monas
+  latlong.LatLng _markerPosition = const latlong.LatLng(-6.175392, 106.827153);
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
     _fetchOfficeData();
+  }
+
+  /// Parse WKB hex string dari kolom geography PostGIS
+  /// Format: 01 01000020 E6100000 [8 bytes lon] [8 bytes lat]
+  /// Returns [longitude, latitude] atau null jika gagal
+  List<double>? _parseWKBHex(String wkb) {
+    try {
+      final hex = wkb.replaceAll(' ', '');
+      final bytes = Uint8List(hex.length ~/ 2);
+      for (int i = 0; i < bytes.length; i++) {
+        bytes[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+      }
+      // byte 0: byte order (01 = little endian)
+      // bytes 1-4: geometry type
+      final typeInt =
+          bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24);
+      final hasSrid = (typeInt & 0x20000000) != 0;
+      // X (longitude) dan Y (latitude) mulai di byte 9 jika ada SRID, byte 5 jika tidak
+      final xOffset = hasSrid ? 9 : 5;
+      final xData = ByteData.sublistView(bytes, xOffset, xOffset + 8);
+      final yData = ByteData.sublistView(bytes, xOffset + 8, xOffset + 16);
+      final longitude = xData.getFloat64(0, Endian.little);
+      final latitude = yData.getFloat64(0, Endian.little);
+      return [longitude, latitude];
+    } catch (e) {
+      debugPrint('WKB parse error: $e');
+      return null;
+    }
   }
 
   Future<void> _fetchOfficeData() async {
@@ -1307,14 +1356,36 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
         }
       }
 
-      if (data['location'] != null) {
-        final coords = data['location']['coordinates'];
-        _longCtrl.text = coords[0].toString();
-        _latCtrl.text = coords[1].toString();
+      final rawLocation = data['location'];
+      if (rawLocation != null) {
+        List<double>? coords;
 
-        setState(() {
-          _markerPosition = latlong.LatLng(coords[1], coords[0]);
-        });
+        if (rawLocation is String) {
+          // Geography column dikembalikan sebagai WKB hex string
+          coords = _parseWKBHex(rawLocation);
+        } else if (rawLocation is Map && rawLocation['coordinates'] != null) {
+          // Fallback: jika sudah berupa GeoJSON map
+          final c = rawLocation['coordinates'];
+          final lon = double.tryParse(c[0].toString());
+          final lat = double.tryParse(c[1].toString());
+          if (lon != null && lat != null) coords = [lon, lat];
+        }
+
+        if (coords != null) {
+          final lon = coords[0];
+          final lat = coords[1];
+          _longCtrl.text = lon.toStringAsFixed(7);
+          _latCtrl.text = lat.toStringAsFixed(7);
+          final savedPosition = latlong.LatLng(lat, lon);
+          setState(() {
+            _markerPosition = savedPosition;
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _mapController.move(savedPosition, 16.0);
+          });
+        } else {
+          debugPrint('Gagal parse lokasi kantor dari: $rawLocation');
+        }
       }
     } catch (e) {
       debugPrint("Error office: $e");
@@ -1323,79 +1394,102 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
     }
   }
 
-  // LOGIKA PENCARIAN ALAMAT (NOMINATIM API)
-  Future<void> _searchAddress() async {
-    final query = _searchCtrl.text.trim();
-    if (query.isEmpty) return;
-
-    setState(() => _isLoading = true);
-    try {
-      // Gunakan Uri.https agar query ter-encode otomatis (spasi, dll)
-      final url = Uri.https('nominatim.openstreetmap.org', '/search', {
-        'q': query,
-        'format': 'json',
-        'limit': '1',
+  /// Update marker & peta saat user mengetik lat/lng secara manual
+  void _updateMarkerFromInput() {
+    final lat = double.tryParse(_latCtrl.text);
+    final lng = double.tryParse(_longCtrl.text);
+    if (lat != null &&
+        lng != null &&
+        lat >= -90 &&
+        lat <= 90 &&
+        lng >= -180 &&
+        lng <= 180) {
+      final newPos = latlong.LatLng(lat, lng);
+      setState(() {
+        _markerPosition = newPos;
       });
+      _mapController.move(newPos, _mapController.camera.zoom);
+    }
+  }
 
-      debugPrint('Searching: $url');
+  void _onSearchChanged(String query) {
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 1000), () {
+      _fetchSuggestions(query);
+    });
+  }
 
-      // Penting: Nominatim mewajibkan User-Agent yang valid
-      final response = await http.get(
-        url,
-        headers: {
-          'User-Agent': 'AdminDashboard/1.0 (contact@example.com)',
-          'Accept': 'application/json',
-        },
-      );
-
-      debugPrint('Status: ${response.statusCode}');
-      debugPrint('Body: ${response.body}');
+  // LOGIKA PENCARIAN ALAMAT + AUTOCOMPLETE (PHOTON API)
+  // Memakai Photon (berbasis OpenStreetMap) karena lebih ramah CORS untuk Web daripada Nominatim
+  Future<void> _fetchSuggestions(String query) async {
+    if (query.trim().length < 3) {
+      setState(() {
+        _suggestions = [];
+        _showSuggestions = false;
+      });
+      return;
+    }
+    setState(() => _isSuggestionLoading = true);
+    try {
+      final url = Uri.https('photon.komoot.io', '/api', {
+        'q': query,
+        'limit': '5',
+      });
+      // Tidak perlu User-Agent custom yang bisa diblokir CORS browser
+      final response = await http.get(url);
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (data is List && data.isNotEmpty) {
-          final lat = double.parse(data[0]['lat']);
-          final lon = double.parse(data[0]['lon']);
-          final newPos = latlong.LatLng(lat, lon);
+        final features = data['features'] as List?;
 
+        if (features != null && mounted) {
           setState(() {
-            _markerPosition = newPos;
-            _latCtrl.text = lat.toString();
-            _longCtrl.text = lon.toString();
-          });
-          // Pindahkan kamera peta ke lokasi hasil pencarian
-          _mapController.move(newPos, 16.0);
+            _suggestions = features.map<Map<String, dynamic>>((f) {
+              final props = f['properties'] ?? {};
+              final geom = f['geometry']['coordinates']; // [lon, lat]
 
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Ditemukan: ${data[0]['display_name']}')),
-            );
-          }
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Alamat tidak ditemukan')),
-            );
-          }
-        }
-      } else {
-        debugPrint('Nominatim error: ${response.statusCode}');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Server error: ${response.statusCode}')),
-          );
+              // Menyusun nama alamat agar rapi
+              List<String> nameParts = [];
+              if (props['name'] != null) nameParts.add(props['name']);
+              if (props['street'] != null) nameParts.add(props['street']);
+              if (props['city'] != null) nameParts.add(props['city']);
+              if (props['state'] != null) nameParts.add(props['state']);
+
+              // Jika kosong, pakai fallback
+              final displayName = nameParts.isNotEmpty
+                  ? nameParts.join(', ')
+                  : 'Lokasi tidak diketahui';
+
+              return {
+                'display_name': displayName,
+                'lat': geom[1].toString(),
+                'lon': geom[0].toString(),
+              };
+            }).toList();
+            _showSuggestions = _suggestions.isNotEmpty;
+          });
         }
       }
     } catch (e) {
-      debugPrint('Search error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Gagal mencari alamat: $e')));
-      }
+      debugPrint('Suggestion error: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isSuggestionLoading = false);
     }
+  }
+
+  void _selectSuggestion(Map<String, dynamic> suggestion) {
+    final lat = double.tryParse(suggestion['lat']) ?? 0;
+    final lon = double.tryParse(suggestion['lon']) ?? 0;
+    final newPos = latlong.LatLng(lat, lon);
+    setState(() {
+      _markerPosition = newPos;
+      _latCtrl.text = lat.toStringAsFixed(7);
+      _longCtrl.text = lon.toStringAsFixed(7);
+      _searchCtrl.text = suggestion['display_name'];
+      _suggestions = [];
+      _showSuggestions = false;
+    });
+    _mapController.move(newPos, 16.0);
   }
 
   Future<void> _saveSettings() async {
@@ -1491,31 +1585,43 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
                                   Expanded(
                                     child: TextField(
                                       controller: _latCtrl,
-                                      readOnly: true,
+                                      keyboardType:
+                                          const TextInputType.numberWithOptions(
+                                            decimal: true,
+                                            signed: true,
+                                          ),
                                       decoration: const InputDecoration(
                                         labelText: "Latitude",
                                         border: OutlineInputBorder(),
-                                        filled: true,
+                                        prefixIcon: Icon(Icons.my_location),
                                       ),
+                                      onChanged: (_) =>
+                                          _updateMarkerFromInput(),
                                     ),
                                   ),
                                   const SizedBox(width: 10),
                                   Expanded(
                                     child: TextField(
                                       controller: _longCtrl,
-                                      readOnly: true,
+                                      keyboardType:
+                                          const TextInputType.numberWithOptions(
+                                            decimal: true,
+                                            signed: true,
+                                          ),
                                       decoration: const InputDecoration(
                                         labelText: "Longitude",
                                         border: OutlineInputBorder(),
-                                        filled: true,
+                                        prefixIcon: Icon(Icons.my_location),
                                       ),
+                                      onChanged: (_) =>
+                                          _updateMarkerFromInput(),
                                     ),
                                   ),
                                 ],
                               ),
                               const SizedBox(height: 10),
                               const Text(
-                                "Gunakan fitur Search di peta atau klik manual untuk update lokasi.",
+                                "Input manual, gunakan search, atau klik peta untuk update lokasi.",
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.blue,
@@ -1684,31 +1790,127 @@ class _OfficeSettingsPageState extends State<OfficeSettingsPage> {
                   ],
                 ),
 
-                // WIDGET SEARCH BAR (Mengambang di atas peta)
+                // WIDGET SEARCH BAR + AUTOCOMPLETE (Mengambang di atas peta)
                 Positioned(
                   top: 10,
                   left: 10,
                   right: 10,
-                  child: Card(
-                    elevation: 4,
-                    child: ListTile(
-                      leading: const Icon(Icons.search, color: Colors.grey),
-                      title: TextField(
-                        controller: _searchCtrl,
-                        decoration: const InputDecoration(
-                          hintText: "Cari alamat (Contoh: Monas Jakarta)",
-                          border: InputBorder.none,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Search bar
+                      Card(
+                        elevation: 4,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        onSubmitted: (_) => _searchAddress(),
-                      ),
-                      trailing: IconButton(
-                        icon: const Icon(
-                          Icons.arrow_forward,
-                          color: Colors.indigo,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.search, color: Colors.grey),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: TextField(
+                                  controller: _searchCtrl,
+                                  decoration: const InputDecoration(
+                                    hintText: 'Cari tempat atau alamat...',
+                                    border: InputBorder.none,
+                                  ),
+                                  onChanged: _onSearchChanged,
+                                  onSubmitted: _onSearchChanged,
+                                ),
+                              ),
+                              if (_isSuggestionLoading)
+                                const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              else if (_searchCtrl.text.isNotEmpty)
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.clear,
+                                    color: Colors.grey,
+                                    size: 20,
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _searchCtrl.clear();
+                                      _suggestions = [];
+                                      _showSuggestions = false;
+                                    });
+                                  },
+                                ),
+                            ],
+                          ),
                         ),
-                        onPressed: _searchAddress,
                       ),
-                    ),
+                      // Dropdown suggestions
+                      if (_showSuggestions)
+                        Card(
+                          elevation: 6,
+                          margin: const EdgeInsets.only(top: 2),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: _suggestions.asMap().entries.map((
+                                entry,
+                              ) {
+                                final idx = entry.key;
+                                final s = entry.value;
+                                return InkWell(
+                                  onTap: () => _selectSuggestion(s),
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      border: idx < _suggestions.length - 1
+                                          ? Border(
+                                              bottom: BorderSide(
+                                                color: Colors.grey[200]!,
+                                              ),
+                                            )
+                                          : null,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 12,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.location_on_outlined,
+                                          color: Colors.indigo[400],
+                                          size: 18,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(
+                                            s['display_name'],
+                                            style: const TextStyle(
+                                              fontSize: 13,
+                                            ),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ],
